@@ -45,7 +45,6 @@ class DatabaseManager:
                 )
             """)
 
-            # Migration check: Add mood column if upgrading from older schema
             cursor.execute("PRAGMA table_info(entries)")
             columns = [column[1] for column in cursor.fetchall()]
             if "mood" not in columns:
@@ -121,14 +120,20 @@ class DiaryWindow(QMainWindow):
         self.setCentralWidget(central_widget)
         main_layout = QHBoxLayout(central_widget)
 
-        # --- Left panel (Calendar) ---
+        # --- Left panel (Calendar & Navigation) ---
         left_panel = QVBoxLayout()
 
         self.calendar = QCalendarWidget()
         self.calendar.setGridVisible(True)
         self.calendar.selectionChanged.connect(self.on_date_changed)
 
+        self.today_button = QPushButton("📅 Go to Today")
+        self.today_button.setMinimumHeight(35)
+        self.today_button.setFont(QFont("Arial", 10, QFont.Weight.Bold))
+        self.today_button.clicked.connect(self.go_to_today)
+
         left_panel.addWidget(self.calendar)
+        left_panel.addWidget(self.today_button)
         left_panel.addStretch()
 
         # --- Right panel (Notes & Mood) ---
@@ -155,7 +160,12 @@ class DiaryWindow(QMainWindow):
         self.text_editor.setPlaceholderText(
             "Write your thoughts for this day here..."
         )
-        self.text_editor.textChanged.connect(self.mark_as_modified)
+        self.text_editor.textChanged.connect(self.on_text_changed)
+
+        # --- Word Counter Label ---
+        self.word_count_label = QLabel("Words: 0 | Characters: 0")
+        self.word_count_label.setStyleSheet("color: #888888; font-size: 11px;")
+        self.word_count_label.setAlignment(Qt.AlignmentFlag.AlignRight)
 
         # --- Buttons Layout ---
         buttons_layout = QHBoxLayout()
@@ -179,14 +189,32 @@ class DiaryWindow(QMainWindow):
 
         right_panel.addLayout(header_layout)
         right_panel.addWidget(self.text_editor)
+        right_panel.addWidget(self.word_count_label)
         right_panel.addLayout(buttons_layout)
 
         main_layout.addLayout(left_panel, 1)
         main_layout.addLayout(right_panel, 2)
 
+    def go_to_today(self):
+        """Snaps the calendar back to the current date."""
+        today = QDate.currentDate()
+        if self.calendar.selectedDate() != today:
+            self.calendar.setSelectedDate(today)
+
+    def update_word_count(self):
+        """Calculates and updates word/character counts."""
+        text = self.text_editor.toPlainText().strip()
+        words = len(text.split()) if text else 0
+        chars = len(text)
+        self.word_count_label.setText(f"Words: {words} | Characters: {chars}")
+
+    def on_text_changed(self):
+        """Triggers when text changes to mark unsaved status and update word count."""
+        self.mark_as_modified()
+        self.update_word_count()
+
     def highlight_saved_dates(self):
         """Fetches saved dates and highlights calendar entries based on mood."""
-        # Clear existing formats for selected date if deleted
         qdate_current = QDate.fromString(self.current_date, Qt.DateFormat.ISODate)
         self.calendar.setDateTextFormat(qdate_current, QTextCharFormat())
 
@@ -251,6 +279,7 @@ class DiaryWindow(QMainWindow):
         self.mood_combo.blockSignals(False)
 
         self.is_modified = False
+        self.update_word_count()
 
     def save_current_entry(self, show_prompt=True):
         """Saves current text and mood tag to SQLite."""
