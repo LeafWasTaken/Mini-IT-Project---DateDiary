@@ -6,6 +6,7 @@ from PyQt6.QtWidgets import (
     QApplication,
     QCalendarWidget,
     QComboBox,
+    QFileDialog,
     QHBoxLayout,
     QLabel,
     QMainWindow,
@@ -24,6 +25,22 @@ MOOD_COLORS = {
     "Sad 😢": "#3B82F6",      # Blue
     "Angry 😡": "#EF4444",    # Red
 }
+
+LIGHT_STYLESHEET = """
+    QMainWindow, QWidget { background-color: #F8FAFC; color: #0F172A; }
+    QCalendarWidget QAbstractItemView:enabled { background-color: #FFFFFF; color: #0F172A; selection-background-color: #E2E8F0; }
+    QCalendarWidget QWidget#qt_calendar_navigationbar { background-color: #F1F5F9; }
+    QTextEdit { background-color: #FFFFFF; color: #0F172A; border: 1px solid #CBD5E1; border-radius: 6px; }
+    QComboBox { background-color: #FFFFFF; color: #0F172A; border: 1px solid #CBD5E1; border-radius: 4px; padding: 4px; }
+"""
+
+DARK_STYLESHEET = """
+    QMainWindow, QWidget { background-color: #1E1E2E; color: #CDD6F4; }
+    QCalendarWidget QAbstractItemView:enabled { background-color: #181825; color: #CDD6F4; selection-background-color: #45475A; }
+    QCalendarWidget QWidget#qt_calendar_navigationbar { background-color: #313244; }
+    QTextEdit { background-color: #181825; color: #CDD6F4; border: 1px solid #45475A; border-radius: 6px; }
+    QComboBox { background-color: #313244; color: #CDD6F4; border: 1px solid #45475A; border-radius: 4px; padding: 4px; }
+"""
 
 
 class DatabaseManager:
@@ -106,6 +123,7 @@ class DiaryWindow(QMainWindow):
         self.db = DatabaseManager()
         self.current_date = QDate.currentDate().toString(Qt.DateFormat.ISODate)
         self.is_modified = False
+        self.is_dark_mode = False
 
         self.init_ui()
         self.load_current_entry()
@@ -114,7 +132,7 @@ class DiaryWindow(QMainWindow):
     def init_ui(self):
         """Sets up the windows, widgets, and layouts."""
         self.setWindowTitle("DateDiary")
-        self.resize(850, 550)
+        self.resize(880, 560)
 
         central_widget = QWidget()
         self.setCentralWidget(central_widget)
@@ -139,11 +157,15 @@ class DiaryWindow(QMainWindow):
         # --- Right panel (Notes & Mood) ---
         right_panel = QVBoxLayout()
 
-        # Header row (Date label + Mood Dropdown)
+        # Header row (Date label + Mood Dropdown + Theme Switcher)
         header_layout = QHBoxLayout()
 
         self.date_label = QLabel("Loading date...")
         self.date_label.setFont(QFont("Arial", 14, QFont.Weight.Bold))
+
+        self.theme_button = QPushButton("🌙 Dark Mode")
+        self.theme_button.setMinimumHeight(30)
+        self.theme_button.clicked.connect(self.toggle_theme)
 
         self.mood_combo = QComboBox()
         self.mood_combo.addItems(list(MOOD_COLORS.keys()))
@@ -152,6 +174,7 @@ class DiaryWindow(QMainWindow):
 
         header_layout.addWidget(self.date_label)
         header_layout.addStretch()
+        header_layout.addWidget(self.theme_button)
         header_layout.addWidget(QLabel("Mood:"))
         header_layout.addWidget(self.mood_combo)
 
@@ -177,6 +200,13 @@ class DiaryWindow(QMainWindow):
         )
         self.delete_button.clicked.connect(self.delete_current_entry)
 
+        self.export_button = QPushButton("Export Entry")
+        self.export_button.setMinimumHeight(40)
+        self.export_button.setStyleSheet(
+            "background-color: #4B5563; color: white; font-weight: bold;"
+        )
+        self.export_button.clicked.connect(self.export_current_entry)
+
         self.save_button = QPushButton("Save Entry")
         self.save_button.setMinimumHeight(40)
         self.save_button.setStyleSheet(
@@ -185,6 +215,7 @@ class DiaryWindow(QMainWindow):
         self.save_button.clicked.connect(self.save_current_entry)
 
         buttons_layout.addWidget(self.delete_button)
+        buttons_layout.addWidget(self.export_button)
         buttons_layout.addWidget(self.save_button)
 
         right_panel.addLayout(header_layout)
@@ -195,11 +226,62 @@ class DiaryWindow(QMainWindow):
         main_layout.addLayout(left_panel, 1)
         main_layout.addLayout(right_panel, 2)
 
+        self.apply_theme()
+
+    def toggle_theme(self):
+        """Toggles between Light and Dark mode."""
+        self.is_dark_mode = not self.is_dark_mode
+        self.apply_theme()
+
+    def apply_theme(self):
+        """Applies the current theme stylesheet."""
+        if self.is_dark_mode:
+            self.setStyleSheet(DARK_STYLESHEET)
+            self.theme_button.setText("☀️ Light Mode")
+        else:
+            self.setStyleSheet(LIGHT_STYLESHEET)
+            self.theme_button.setText("🌙 Dark Mode")
+
     def go_to_today(self):
         """Snaps the calendar back to the current date."""
         today = QDate.currentDate()
         if self.calendar.selectedDate() != today:
             self.calendar.setSelectedDate(today)
+
+    def export_current_entry(self):
+        """Exports the active diary entry to a .txt or .md file."""
+        content = self.text_editor.toPlainText().strip()
+        if not content:
+            QMessageBox.warning(
+                self, "Export Failed", "There is no text to export for this entry!"
+            )
+            return
+
+        mood = self.mood_combo.currentText()
+        default_filename = f"DateDiary_{self.current_date}.txt"
+
+        file_path, _ = QFileDialog.getSaveFileName(
+            self,
+            "Export Diary Entry",
+            default_filename,
+            "Text Files (*.txt);;Markdown Files (*.md);;All Files (*)",
+        )
+
+        if file_path:
+            try:
+                with open(file_path, "w", encoding="utf-8") as f:
+                    f.write(f"Date: {self.current_date}\n")
+                    f.write(f"Mood: {mood}\n")
+                    f.write("=" * 35 + "\n\n")
+                    f.write(content)
+
+                QMessageBox.information(
+                    self, "Export Successful", f"Entry exported successfully to:\n{file_path}"
+                )
+            except Exception as e:
+                QMessageBox.critical(
+                    self, "Export Error", f"An error occurred while saving file:\n{str(e)}"
+                )
 
     def update_word_count(self):
         """Calculates and updates word/character counts."""
