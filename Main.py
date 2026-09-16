@@ -1,10 +1,13 @@
+import os
+import shutil
 import sqlite3
 import sys
-from PyQt6.QtCore import QDate, Qt
-from PyQt6.QtGui import QCloseEvent, QColor, QFont, QTextCharFormat
+from PyQt6.QtCore import QDate, QSettings, Qt
+from PyQt6.QtGui import QCloseEvent, QColor, QFont, QPixmap, QTextCharFormat
 from PyQt6.QtWidgets import (
     QApplication,
     QCalendarWidget,
+    QColorDialog,
     QComboBox,
     QFileDialog,
     QHBoxLayout,
@@ -51,52 +54,66 @@ class DatabaseManager:
         self.init_db()
 
     def init_db(self):
-        """Creates the table and handles schema migration for mood support."""
+        """Creates table and handles schema migration for mood and image support."""
         with sqlite3.connect(self.db_name) as conn:
             cursor = conn.cursor()
             cursor.execute("""
                 CREATE TABLE IF NOT EXISTS entries (
                     date TEXT PRIMARY KEY,
                     content TEXT,
-                    mood TEXT
+                    mood TEXT,
+                    image_path TEXT
                 )
             """)
 
             cursor.execute("PRAGMA table_info(entries)")
             columns = [column[1] for column in cursor.fetchall()]
+
             if "mood" not in columns:
                 cursor.execute(
                     "ALTER TABLE entries ADD COLUMN mood TEXT DEFAULT 'Neutral 😐'"
                 )
 
+            if "image_path" not in columns:
+                try:
+                    cursor.execute("ALTER TABLE entries ADD COLUMN image_path TEXT")
+                    print("Database updated: Added 'image_path' column.")
+                except Exception:
+                    pass
+
             conn.commit()
 
-    def get_entry(self, date_str: str) -> tuple[str, str]:
-        """Retrieves content and mood for a specific date."""
+    def get_entry(self, date_str: str) -> tuple[str, str, str]:
+        """Retrieves content, mood, and image_path for a specific date."""
         with sqlite3.connect(self.db_name) as conn:
             cursor = conn.cursor()
             cursor.execute(
-                "SELECT content, mood FROM entries WHERE date = ?", (date_str,)
+                "SELECT content, mood, image_path FROM entries WHERE date = ?", (date_str,)
             )
             result = cursor.fetchone()
             if result:
-                content, mood = result
-                return content if content else "", mood if mood else "Neutral 😐"
-            return "", "Neutral 😐"
+                content, mood, image_path = result
+                return (
+                    content if content else "",
+                    mood if mood else "Neutral 😐",
+                    image_path if image_path else "",
+                )
+            return "", "Neutral 😐", ""
 
-    def save_entry(self, date_str: str, content: str, mood: str):
-        """Saves or updates entry content and mood tag for a specific date."""
+    def save_entry(self, date_str: str, content: str, mood: str, image_path: str = ""):
+        """Saves or updates entry content, mood tag, and image path for a specific date."""
         with sqlite3.connect(self.db_name) as conn:
             cursor = conn.cursor()
             cursor.execute(
                 """
-                INSERT INTO entries (date, content, mood) 
-                VALUES (?, ?, ?)
+                INSERT INTO entries (date, content, mood, image_path) 
+                VALUES (?, ?, ?, ?)
                 ON CONFLICT(date) DO UPDATE SET 
                     content = excluded.content,
-                    mood = excluded.mood
+                    mood = excluded.mood,
+                    image_path = excluded.image_path
             """,
-                (date_str, content, mood),
+                (date_str, content, mood, image_path),
             )
             conn.commit()
 
@@ -111,7 +128,9 @@ class DatabaseManager:
         """Returns a list of tuples containing (date, mood) for active entries."""
         with sqlite3.connect(self.db_name) as conn:
             cursor = conn.cursor()
-            cursor.execute("SELECT date, mood FROM entries WHERE content != '' OR mood != ''")
+            cursor.execute(
+                "SELECT date, mood FROM entries WHERE content != '' OR mood != '' OR (image_path IS NOT NULL AND image_path != '')"
+            )
             return cursor.fetchall()
 
 
@@ -122,17 +141,54 @@ class DiaryWindow(QMainWindow):
         super().__init__()
         self.db = DatabaseManager()
         self.current_date = QDate.currentDate().toString(Qt.DateFormat.ISODate)
+        self.current_image_path = ""
         self.is_modified = False
-        self.is_dark_mode = False
+        self.settings = QSettings("DateDiary", "ThemeSettings")
+        self.is_dark_mode = self.settings.value("dark_mode", False, type=bool)
 
         self.init_ui()
         self.load_current_entry()
         self.highlight_saved_dates()
 
+    def set_bold(self):
+        """Toggles bold on selected text."""
+        fmt = self.text_editor.currentCharFormat()
+        fmt.setFontWeight(
+            QFont.Weight.Bold if fmt.fontWeight() != QFont.Weight.Bold else QFont.Weight.Normal
+        )
+        self.text_editor.mergeCurrentCharFormat(fmt)
+
+    def set_italic(self):
+        """Toggles italic on selected text."""
+        fmt = self.text_editor.currentCharFormat()
+        fmt.setFontItalic(not fmt.fontItalic())
+        self.text_editor.mergeCurrentCharFormat(fmt)
+
+    def set_underline(self):
+        """Toggles underline on selected text."""
+        fmt = self.text_editor.currentCharFormat()
+        fmt.setFontUnderline(not fmt.fontUnderline())
+        self.text_editor.mergeCurrentCharFormat(fmt)
+
+    def set_text_color(self):
+        """Opens color picker dialog to set font color."""
+        color = QColorDialog.getColor()
+        if color.isValid():
+            fmt = self.text_editor.currentCharFormat()
+            fmt.setForeground(color)
+            self.text_editor.mergeCurrentCharFormat(fmt)
+
+    def set_font_size(self, size_str: str):
+        """Changes font size of selected text."""
+        if size_str.isdigit():
+            fmt = self.text_editor.currentCharFormat()
+            fmt.setFontPointSize(float(size_str))
+            self.text_editor.mergeCurrentCharFormat(fmt)
+
     def init_ui(self):
         """Sets up the windows, widgets, and layouts."""
         self.setWindowTitle("DateDiary")
-        self.resize(880, 560)
+        self.resize(920, 640)
 
         central_widget = QWidget()
         self.setCentralWidget(central_widget)
@@ -154,7 +210,7 @@ class DiaryWindow(QMainWindow):
         left_panel.addWidget(self.today_button)
         left_panel.addStretch()
 
-        # --- Right panel (Notes & Mood) ---
+        # --- Right panel (Notes, Photos & Mood) ---
         right_panel = QVBoxLayout()
 
         # Header row (Date label + Mood Dropdown + Theme Switcher)
@@ -178,49 +234,97 @@ class DiaryWindow(QMainWindow):
         header_layout.addWidget(QLabel("Mood:"))
         header_layout.addWidget(self.mood_combo)
 
+        # --- Formatting Toolbar ---
+        format_layout = QHBoxLayout()
+
+        bold_btn = QPushButton("B")
+        bold_btn.setFont(QFont("Arial", 10, QFont.Weight.Bold))
+        bold_btn.setFixedWidth(32)
+        bold_btn.clicked.connect(self.set_bold)
+
+        italic_btn = QPushButton("I")
+        italic_btn.setFont(QFont("Arial", 10, QFont.Weight.Normal, True))
+        italic_btn.setFixedWidth(32)
+        italic_btn.clicked.connect(self.set_italic)
+
+        underline_btn = QPushButton("U")
+        underline_btn.setFixedWidth(32)
+        underline_btn.clicked.connect(self.set_underline)
+
+        color_btn = QPushButton("🎨 Color")
+        color_btn.clicked.connect(self.set_text_color)
+
+        self.size_combo = QComboBox()
+        self.size_combo.addItems(["10", "12", "14", "16", "18", "20", "24"])
+        self.size_combo.setCurrentText("12")
+        self.size_combo.currentTextChanged.connect(self.set_font_size)
+
+        format_layout.addWidget(bold_btn)
+        format_layout.addWidget(italic_btn)
+        format_layout.addWidget(underline_btn)
+        format_layout.addWidget(color_btn)
+        format_layout.addWidget(QLabel("Size:"))
+        format_layout.addWidget(self.size_combo)
+        format_layout.addStretch()
+
+        # Text Editor
         self.text_editor = QTextEdit()
         self.text_editor.setFont(QFont("Arial", 11))
-        self.text_editor.setPlaceholderText(
-            "Write your thoughts for this day here..."
-        )
+        self.text_editor.setPlaceholderText("Write your thoughts for this day here...")
         self.text_editor.textChanged.connect(self.on_text_changed)
 
-        # --- Word Counter Label ---
+        # Word Counter Label
         self.word_count_label = QLabel("Words: 0 | Characters: 0")
         self.word_count_label.setStyleSheet("color: #888888; font-size: 11px;")
         self.word_count_label.setAlignment(Qt.AlignmentFlag.AlignRight)
 
-        # --- Buttons Layout ---
+        # --- Photo Attachment Section ---
+        self.image_label = QLabel("No photo attached")
+        self.image_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.image_label.setFixedHeight(120)
+        self.image_label.setStyleSheet("border: 1px dashed #CBD5E1; border-radius: 6px; color: #888888;")
+
+        photo_btn_layout = QHBoxLayout()
+        self.attach_img_btn = QPushButton("📷 Attach Photo")
+        self.attach_img_btn.setMinimumHeight(32)
+        self.attach_img_btn.clicked.connect(self.attach_image)
+
+        self.remove_img_btn = QPushButton("❌ Remove Photo")
+        self.remove_img_btn.setMinimumHeight(32)
+        self.remove_img_btn.clicked.connect(self.remove_image)
+
+        photo_btn_layout.addWidget(self.attach_img_btn)
+        photo_btn_layout.addWidget(self.remove_img_btn)
+
+        # --- Main Action Buttons Layout ---
         buttons_layout = QHBoxLayout()
 
         self.delete_button = QPushButton("Delete Entry")
         self.delete_button.setMinimumHeight(40)
-        self.delete_button.setStyleSheet(
-            "background-color: #CD5C5C; color: white; font-weight: bold;"
-        )
+        self.delete_button.setStyleSheet("background-color: #CD5C5C; color: white; font-weight: bold;")
         self.delete_button.clicked.connect(self.delete_current_entry)
 
         self.export_button = QPushButton("Export Entry")
         self.export_button.setMinimumHeight(40)
-        self.export_button.setStyleSheet(
-            "background-color: #4B5563; color: white; font-weight: bold;"
-        )
+        self.export_button.setStyleSheet("background-color: #4B5563; color: white; font-weight: bold;")
         self.export_button.clicked.connect(self.export_current_entry)
 
         self.save_button = QPushButton("Save Entry")
         self.save_button.setMinimumHeight(40)
-        self.save_button.setStyleSheet(
-            "background-color: #2E8B57; color: white; font-weight: bold;"
-        )
+        self.save_button.setStyleSheet("background-color: #2E8B57; color: white; font-weight: bold;")
         self.save_button.clicked.connect(self.save_current_entry)
 
         buttons_layout.addWidget(self.delete_button)
         buttons_layout.addWidget(self.export_button)
         buttons_layout.addWidget(self.save_button)
 
+        # Assemble Right Panel
         right_panel.addLayout(header_layout)
+        right_panel.addLayout(format_layout)
         right_panel.addWidget(self.text_editor)
         right_panel.addWidget(self.word_count_label)
+        right_panel.addWidget(self.image_label)
+        right_panel.addLayout(photo_btn_layout)
         right_panel.addLayout(buttons_layout)
 
         main_layout.addLayout(left_panel, 1)
@@ -228,9 +332,48 @@ class DiaryWindow(QMainWindow):
 
         self.apply_theme()
 
+    def attach_image(self):
+        """Selects an image, copies it to local project storage, and updates UI."""
+        file_path, _ = QFileDialog.getOpenFileName(
+            self, "Select Photo", "", "Images (*.png *.jpg *.jpeg *.bmp)"
+        )
+        if file_path:
+            os.makedirs("assets/photos", exist_ok=True)
+            ext = os.path.splitext(file_path)[1]
+            dest_path = f"assets/photos/{self.current_date}{ext}"
+            
+            try:
+                shutil.copy2(file_path, dest_path)
+                self.current_image_path = dest_path
+                self.display_image(dest_path)
+                self.mark_as_modified()
+            except Exception as e:
+                QMessageBox.critical(self, "Error", f"Failed to attach image:\n{str(e)}")
+
+    def remove_image(self):
+        """Clears attached image from current entry."""
+        self.current_image_path = ""
+        self.image_label.setText("No photo attached")
+        self.image_label.setPixmap(QPixmap())
+        self.mark_as_modified()
+
+    def display_image(self, path: str):
+        """Displays image inside QLabel scaled properly."""
+        if path and os.path.exists(path):
+            pixmap = QPixmap(path)
+            if not pixmap.isNull():
+                scaled_pixmap = pixmap.scaled(
+                    300, 110, Qt.AspectRatioMode.KeepAspectRatio, Qt.TransformationMode.SmoothTransformation
+                )
+                self.image_label.setPixmap(scaled_pixmap)
+                return
+        self.image_label.setText("No photo attached")
+        self.image_label.setPixmap(QPixmap())
+
     def toggle_theme(self):
         """Toggles between Light and Dark mode."""
         self.is_dark_mode = not self.is_dark_mode
+        self.settings.setValue("dark_mode", self.is_dark_mode)
         self.apply_theme()
 
     def apply_theme(self):
@@ -243,20 +386,17 @@ class DiaryWindow(QMainWindow):
             self.theme_button.setText("🌙 Dark Mode")
 
     def go_to_today(self):
-        """Snaps the calendar back to the current date."""
+        """Snaps calendar back to current date."""
         today = QDate.currentDate()
         if self.calendar.selectedDate() != today:
             self.calendar.setSelectedDate(today)
 
     def export_current_entry(self):
-        """Exports the active diary entry to a .txt or .md file."""
+        """Exports active entry to a file."""
         content = self.text_editor.toPlainText().strip()
         if not content:
-            QMessageBox.warning(
-                self, "Export Failed", "There is no text to export for this entry!"
-            )
+            QMessageBox.warning(self, "Export Failed", "There is no text to export!")
             return
-
         mood = self.mood_combo.currentText()
         default_filename = f"DateDiary_{self.current_date}.txt"
 
@@ -272,16 +412,15 @@ class DiaryWindow(QMainWindow):
                 with open(file_path, "w", encoding="utf-8") as f:
                     f.write(f"Date: {self.current_date}\n")
                     f.write(f"Mood: {mood}\n")
+                    f.write(f"Image: {self.current_image_path if self.current_image_path else 'None'}\n")
                     f.write("=" * 35 + "\n\n")
                     f.write(content)
 
                 QMessageBox.information(
-                    self, "Export Successful", f"Entry exported successfully to:\n{file_path}"
+                    self, "Export Successful", f"Entry exported to:\n{file_path}"
                 )
             except Exception as e:
-                QMessageBox.critical(
-                    self, "Export Error", f"An error occurred while saving file:\n{str(e)}"
-                )
+                QMessageBox.critical(self, "Export Error", f"Error saving file:\n{str(e)}")
 
     def update_word_count(self):
         """Calculates and updates word/character counts."""
@@ -291,12 +430,12 @@ class DiaryWindow(QMainWindow):
         self.word_count_label.setText(f"Words: {words} | Characters: {chars}")
 
     def on_text_changed(self):
-        """Triggers when text changes to mark unsaved status and update word count."""
+        """Triggers when text changes to mark unsaved status."""
         self.mark_as_modified()
         self.update_word_count()
 
     def highlight_saved_dates(self):
-        """Fetches saved dates and highlights calendar entries based on mood."""
+        """Highlights calendar entries with saved entries."""
         qdate_current = QDate.fromString(self.current_date, Qt.DateFormat.ISODate)
         self.calendar.setDateTextFormat(qdate_current, QTextCharFormat())
 
@@ -312,11 +451,11 @@ class DiaryWindow(QMainWindow):
                 self.calendar.setDateTextFormat(qdate, fmt)
 
     def mark_as_modified(self):
-        """Flags the current text/mood as having unsaved changes."""
+        """Flags current text/mood/image as having unsaved changes."""
         self.is_modified = True
 
     def on_date_changed(self):
-        """Triggered when the user clicks a new date on the calendar."""
+        """Triggered when user clicks a new date on the calendar."""
         if self.is_modified:
             reply = QMessageBox.question(
                 self,
@@ -342,14 +481,16 @@ class DiaryWindow(QMainWindow):
         self.load_current_entry()
 
     def load_current_entry(self):
-        """Loads text and mood from the database into the editor UI."""
+        """Loads text, mood, and photo from database into editor UI."""
         self.date_label.setText(f"Entry for: {self.current_date}")
 
         self.text_editor.blockSignals(True)
         self.mood_combo.blockSignals(True)
 
-        content, mood = self.db.get_entry(self.current_date)
-        self.text_editor.setPlainText(content)
+        content, mood, image_path = self.db.get_entry(self.current_date)
+        self.text_editor.setHtml(content)
+        self.current_image_path = image_path
+        self.display_image(image_path)
 
         idx = self.mood_combo.findText(mood)
         if idx != -1:
@@ -364,12 +505,12 @@ class DiaryWindow(QMainWindow):
         self.update_word_count()
 
     def save_current_entry(self, show_prompt=True):
-        """Saves current text and mood tag to SQLite."""
-        content = self.text_editor.toPlainText().strip()
+        """Saves current text, mood tag, and image path to SQLite."""
+        content = self.text_editor.toHtml() if self.text_editor.toPlainText().strip() else ""
         mood = self.mood_combo.currentText()
 
-        if content:
-            self.db.save_entry(self.current_date, content, mood)
+        if content or self.current_image_path:
+            self.db.save_entry(self.current_date, content, mood, self.current_image_path)
         else:
             self.db.delete_entry(self.current_date)
 
@@ -382,7 +523,7 @@ class DiaryWindow(QMainWindow):
             )
 
     def delete_current_entry(self):
-        """Deletes entry and clears the editor."""
+        """Deletes entry and clears editor."""
         reply = QMessageBox.question(
             self,
             "Confirm Delete",
