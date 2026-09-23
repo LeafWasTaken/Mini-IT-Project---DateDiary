@@ -20,6 +20,14 @@ from PyQt6.QtWidgets import (
     QWidget,
 )
 
+
+def get_app_dir() -> str:
+    """Returns absolute path to app root directory (handles PyInstaller standalone builds)."""
+    if getattr(sys, "frozen", False):
+        return os.path.dirname(sys.executable)
+    return os.path.dirname(os.path.abspath(__file__))
+
+
 MOOD_COLORS = {
     "Neutral 😐": "#6B7280",  # Gray
     "Happy 😊": "#10B981",    # Green
@@ -50,7 +58,10 @@ class DatabaseManager:
     """Handles all SQLite database operations for DateDiary."""
 
     def __init__(self, db_name="datediary.db"):
-        self.db_name = db_name
+        if not os.path.isabs(db_name):
+            self.db_name = os.path.join(get_app_dir(), db_name)
+        else:
+            self.db_name = db_name
         self.init_db()
 
     def init_db(self):
@@ -333,19 +344,31 @@ class DiaryWindow(QMainWindow):
         self.apply_theme()
 
     def attach_image(self):
-        """Selects an image, copies it to local project storage, and updates UI."""
+        """Selects an image, cleans up previous photos for date, copies to project storage, and updates UI."""
         file_path, _ = QFileDialog.getOpenFileName(
             self, "Select Photo", "", "Images (*.png *.jpg *.jpeg *.bmp)"
         )
         if file_path:
-            os.makedirs("assets/photos", exist_ok=True)
-            ext = os.path.splitext(file_path)[1]
-            dest_path = f"assets/photos/{self.current_date}{ext}"
-            
+            rel_photos_dir = os.path.join("assets", "photos")
+            abs_photos_dir = os.path.join(get_app_dir(), rel_photos_dir)
+            os.makedirs(abs_photos_dir, exist_ok=True)
+
+            # Clean up old image files matching the current date to prevent orphan extensions (.png vs .jpg)
+            for existing_file in os.listdir(abs_photos_dir):
+                if existing_file.startswith(self.current_date + "."):
+                    try:
+                        os.remove(os.path.join(abs_photos_dir, existing_file))
+                    except Exception:
+                        pass
+
+            ext = os.path.splitext(file_path)[1].lower()
+            rel_dest_path = os.path.join(rel_photos_dir, f"{self.current_date}{ext}")
+            abs_dest_path = os.path.join(get_app_dir(), rel_dest_path)
+
             try:
-                shutil.copy2(file_path, dest_path)
-                self.current_image_path = dest_path
-                self.display_image(dest_path)
+                shutil.copy2(file_path, abs_dest_path)
+                self.current_image_path = rel_dest_path
+                self.display_image(rel_dest_path)
                 self.mark_as_modified()
             except Exception as e:
                 QMessageBox.critical(self, "Error", f"Failed to attach image:\n{str(e)}")
@@ -358,9 +381,10 @@ class DiaryWindow(QMainWindow):
         self.mark_as_modified()
 
     def display_image(self, path: str):
-        """Displays image inside QLabel scaled properly."""
-        if path and os.path.exists(path):
-            pixmap = QPixmap(path)
+        """Displays image inside QLabel scaled properly, resolving relative paths dynamically."""
+        full_path = os.path.join(get_app_dir(), path) if path and not os.path.isabs(path) else path
+        if full_path and os.path.exists(full_path):
+            pixmap = QPixmap(full_path)
             if not pixmap.isNull():
                 scaled_pixmap = pixmap.scaled(
                     300, 110, Qt.AspectRatioMode.KeepAspectRatio, Qt.TransformationMode.SmoothTransformation
