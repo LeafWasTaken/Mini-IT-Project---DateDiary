@@ -1,3 +1,4 @@
+import hashlib
 import os
 import shutil
 import sqlite3
@@ -9,11 +10,14 @@ from PyQt6.QtWidgets import (
     QCalendarWidget,
     QColorDialog,
     QComboBox,
+    QDialog,
     QFileDialog,
     QHBoxLayout,
     QLabel,
+    QLineEdit,
     QMainWindow,
     QMessageBox,
+    QProgressBar,
     QPushButton,
     QTextEdit,
     QVBoxLayout,
@@ -38,20 +42,122 @@ MOOD_COLORS = {
 }
 
 LIGHT_STYLESHEET = """
-    QMainWindow, QWidget { background-color: #F8FAFC; color: #0F172A; }
+    QMainWindow, QWidget, QDialog { background-color: #F8FAFC; color: #0F172A; }
     QCalendarWidget QAbstractItemView:enabled { background-color: #FFFFFF; color: #0F172A; selection-background-color: #E2E8F0; }
     QCalendarWidget QWidget#qt_calendar_navigationbar { background-color: #F1F5F9; }
-    QTextEdit { background-color: #FFFFFF; color: #0F172A; border: 1px solid #CBD5E1; border-radius: 6px; }
+    QTextEdit, QLineEdit { background-color: #FFFFFF; color: #0F172A; border: 1px solid #CBD5E1; border-radius: 6px; padding: 4px; }
     QComboBox { background-color: #FFFFFF; color: #0F172A; border: 1px solid #CBD5E1; border-radius: 4px; padding: 4px; }
 """
 
 DARK_STYLESHEET = """
-    QMainWindow, QWidget { background-color: #1E1E2E; color: #CDD6F4; }
+    QMainWindow, QWidget, QDialog { background-color: #1E1E2E; color: #CDD6F4; }
     QCalendarWidget QAbstractItemView:enabled { background-color: #181825; color: #CDD6F4; selection-background-color: #45475A; }
     QCalendarWidget QWidget#qt_calendar_navigationbar { background-color: #313244; }
-    QTextEdit { background-color: #181825; color: #CDD6F4; border: 1px solid #45475A; border-radius: 6px; }
+    QTextEdit, QLineEdit { background-color: #181825; color: #CDD6F4; border: 1px solid #45475A; border-radius: 6px; padding: 4px; }
     QComboBox { background-color: #313244; color: #CDD6F4; border: 1px solid #45475A; border-radius: 4px; padding: 4px; }
 """
+
+
+class EntryPinDialog(QDialog):
+    """Dialog for setting or verifying a password/PIN for a specific entry."""
+
+    def __init__(self, mode="verify", parent=None):
+        super().__init__(parent)
+        self.mode = mode  # 'verify' or 'set'
+        self.pin = ""
+        self.init_ui()
+
+    def init_ui(self):
+        self.setWindowTitle("Unlock Entry" if self.mode == "verify" else "Lock Entry")
+        self.setFixedSize(320, 150)
+        layout = QVBoxLayout(self)
+
+        lbl_text = (
+            "Enter password to view this entry:"
+            if self.mode == "verify"
+            else "Set a password/PIN for this entry:"
+        )
+        layout.addWidget(QLabel(lbl_text))
+
+        self.pin_input = QLineEdit()
+        self.pin_input.setEchoMode(QLineEdit.EchoMode.Password)
+        self.pin_input.setPlaceholderText("Password / PIN...")
+        layout.addWidget(self.pin_input)
+
+        btn_layout = QHBoxLayout()
+        ok_btn = QPushButton("OK")
+        ok_btn.clicked.connect(self.accept_pin)
+        cancel_btn = QPushButton("Cancel")
+        cancel_btn.clicked.connect(self.reject)
+
+        btn_layout.addWidget(ok_btn)
+        btn_layout.addWidget(cancel_btn)
+        layout.addLayout(btn_layout)
+
+    def accept_pin(self):
+        self.pin = self.pin_input.text().strip()
+        if not self.pin:
+            QMessageBox.warning(self, "Error", "Password cannot be empty!")
+            return
+        self.accept()
+
+
+class MoodAnalyticsDialog(QDialog):
+    """Dialog displaying mood frequency breakdown and percentages."""
+
+    def __init__(self, db_manager, parent=None):
+        super().__init__(parent)
+        self.db = db_manager
+        self.setWindowTitle("📊 Mood Analytics")
+        self.setMinimumSize(380, 360)
+        self.init_ui()
+
+    def init_ui(self):
+        layout = QVBoxLayout(self)
+
+        title = QLabel("Mood Frequency Summary")
+        title.setFont(QFont("Arial", 12, QFont.Weight.Bold))
+        layout.addWidget(title)
+
+        stats = self.db.get_mood_stats()
+        total_entries = sum(stats.values())
+
+        total_lbl = QLabel(f"Total Entries Recorded: {total_entries}")
+        total_lbl.setStyleSheet("color: #888888; margin-bottom: 10px;")
+        layout.addWidget(total_lbl)
+
+        if total_entries == 0:
+            layout.addWidget(QLabel("No entries recorded yet."))
+        else:
+            for mood, color in MOOD_COLORS.items():
+                count = stats.get(mood, 0)
+                percentage = int((count / total_entries) * 100) if total_entries > 0 else 0
+
+                row_layout = QVBoxLayout()
+                info_layout = QHBoxLayout()
+
+                mood_lbl = QLabel(f"{mood}: {count} ({percentage}%)")
+                info_layout.addWidget(mood_lbl)
+                info_layout.addStretch()
+
+                bar = QProgressBar()
+                bar.setRange(0, 100)
+                bar.setValue(percentage)
+                bar.setTextVisible(False)
+                bar.setFixedHeight(12)
+                bar.setStyleSheet(
+                    f"QProgressBar::chunk {{ background-color: {color}; border-radius: 4px; }} "
+                    f"QProgressBar {{ border: 1px solid #CBD5E1; border-radius: 4px; background: #E2E8F0; }}"
+                )
+
+                row_layout.addLayout(info_layout)
+                row_layout.addWidget(bar)
+                layout.addLayout(row_layout)
+
+        layout.addStretch()
+        close_btn = QPushButton("Close")
+        close_btn.clicked.connect(self.accept)
+        layout.addWidget(close_btn)
 
 
 class DatabaseManager:
@@ -65,7 +171,7 @@ class DatabaseManager:
         self.init_db()
 
     def init_db(self):
-        """Creates table and handles schema migration for mood and image support."""
+        """Creates table and handles schema migration for mood, image, and date locking."""
         with sqlite3.connect(self.db_name) as conn:
             cursor = conn.cursor()
             cursor.execute("""
@@ -73,7 +179,9 @@ class DatabaseManager:
                     date TEXT PRIMARY KEY,
                     content TEXT,
                     mood TEXT,
-                    image_path TEXT
+                    image_path TEXT,
+                    is_locked INTEGER DEFAULT 0,
+                    pin_hash TEXT DEFAULT ''
                 )
             """)
 
@@ -81,50 +189,72 @@ class DatabaseManager:
             columns = [column[1] for column in cursor.fetchall()]
 
             if "mood" not in columns:
-                cursor.execute(
-                    "ALTER TABLE entries ADD COLUMN mood TEXT DEFAULT 'Neutral 😐'"
-                )
+                cursor.execute("ALTER TABLE entries ADD COLUMN mood TEXT DEFAULT 'Neutral 😐'")
 
             if "image_path" not in columns:
                 try:
                     cursor.execute("ALTER TABLE entries ADD COLUMN image_path TEXT")
-                    print("Database updated: Added 'image_path' column.")
+                except Exception:
+                    pass
+
+            if "is_locked" not in columns:
+                try:
+                    cursor.execute("ALTER TABLE entries ADD COLUMN is_locked INTEGER DEFAULT 0")
+                except Exception:
+                    pass
+
+            if "pin_hash" not in columns:
+                try:
+                    cursor.execute("ALTER TABLE entries ADD COLUMN pin_hash TEXT DEFAULT ''")
                 except Exception:
                     pass
 
             conn.commit()
 
-    def get_entry(self, date_str: str) -> tuple[str, str, str]:
-        """Retrieves content, mood, and image_path for a specific date."""
+    def get_entry(self, date_str: str) -> tuple[str, str, str, int, str]:
+        """Retrieves content, mood, image_path, is_locked, and pin_hash for a specific date."""
         with sqlite3.connect(self.db_name) as conn:
             cursor = conn.cursor()
             cursor.execute(
-                "SELECT content, mood, image_path FROM entries WHERE date = ?", (date_str,)
+                "SELECT content, mood, image_path, is_locked, pin_hash FROM entries WHERE date = ?",
+                (date_str,),
             )
             result = cursor.fetchone()
             if result:
-                content, mood, image_path = result
+                content, mood, image_path, is_locked, pin_hash = result
                 return (
                     content if content else "",
                     mood if mood else "Neutral 😐",
                     image_path if image_path else "",
+                    is_locked if is_locked else 0,
+                    pin_hash if pin_hash else "",
                 )
-            return "", "Neutral 😐", ""
+            return "", "Neutral 😐", "", 0, ""
 
-    def save_entry(self, date_str: str, content: str, mood: str, image_path: str = ""):
-        """Saves or updates entry content, mood tag, and image path for a specific date."""
+    def save_entry(
+        self,
+        date_str: str,
+        content: str,
+        mood: str,
+        image_path: str = "",
+        is_locked: int = 0,
+        pin_hash: str = "",
+    ):
+        """Saves or updates entry content, mood tag, image path, and lock status for a specific date."""
         with sqlite3.connect(self.db_name) as conn:
             cursor = conn.cursor()
             cursor.execute(
                 """
-                INSERT INTO entries (date, content, mood, image_path) 
-                VALUES (?, ?, ?, ?)
+                INSERT INTO entries (date, content, mood, image_path, is_locked, pin_hash) 
+                VALUES (?, ?, ?, ?, ?, ?)
                 ON CONFLICT(date) DO UPDATE SET 
                     content = excluded.content,
                     mood = excluded.mood,
-                    image_path = excluded.image_path
+                    image_path = excluded.image_path,
+                    is_locked = excluded.is_locked,
+                    pin_hash = excluded.pin_hash
             """,
-                (date_str, content, mood, image_path),
+                (date_str, content, mood, image_path, is_locked, pin_hash),
             )
             conn.commit()
 
@@ -144,6 +274,15 @@ class DatabaseManager:
             )
             return cursor.fetchall()
 
+    def get_mood_stats(self) -> dict[str, int]:
+        """Returns total counts grouped by mood."""
+        with sqlite3.connect(self.db_name) as conn:
+            cursor = conn.cursor()
+            cursor.execute(
+                "SELECT mood, COUNT(*) FROM entries WHERE content != '' OR (image_path IS NOT NULL AND image_path != '') GROUP BY mood"
+            )
+            return dict(cursor.fetchall())
+
 
 class DiaryWindow(QMainWindow):
     """The main graphical user interface for DateDiary."""
@@ -153,6 +292,10 @@ class DiaryWindow(QMainWindow):
         self.db = DatabaseManager()
         self.current_date = QDate.currentDate().toString(Qt.DateFormat.ISODate)
         self.current_image_path = ""
+        self.current_is_locked = 0
+        self.current_pin_hash = ""
+        self.unlocked_session_dates = set()  # Dates unlocked during current session
+
         self.is_modified = False
         self.settings = QSettings("DateDiary", "ThemeSettings")
         self.is_dark_mode = self.settings.value("dark_mode", False, type=bool)
@@ -199,7 +342,7 @@ class DiaryWindow(QMainWindow):
     def init_ui(self):
         """Sets up the windows, widgets, and layouts."""
         self.setWindowTitle("DateDiary")
-        self.resize(920, 640)
+        self.resize(960, 640)
 
         central_widget = QWidget()
         self.setCentralWidget(central_widget)
@@ -224,11 +367,19 @@ class DiaryWindow(QMainWindow):
         # --- Right panel (Notes, Photos & Mood) ---
         right_panel = QVBoxLayout()
 
-        # Header row (Date label + Mood Dropdown + Theme Switcher)
+        # Header row
         header_layout = QHBoxLayout()
 
         self.date_label = QLabel("Loading date...")
         self.date_label.setFont(QFont("Arial", 14, QFont.Weight.Bold))
+
+        self.analytics_btn = QPushButton("📊 Analytics")
+        self.analytics_btn.setMinimumHeight(30)
+        self.analytics_btn.clicked.connect(self.open_analytics)
+
+        self.lock_entry_btn = QPushButton("🔒 Lock Entry")
+        self.lock_entry_btn.setMinimumHeight(30)
+        self.lock_entry_btn.clicked.connect(self.handle_lock_button)
 
         self.theme_button = QPushButton("🌙 Dark Mode")
         self.theme_button.setMinimumHeight(30)
@@ -241,12 +392,16 @@ class DiaryWindow(QMainWindow):
 
         header_layout.addWidget(self.date_label)
         header_layout.addStretch()
+        header_layout.addWidget(self.analytics_btn)
+        header_layout.addWidget(self.lock_entry_btn)
         header_layout.addWidget(self.theme_button)
         header_layout.addWidget(QLabel("Mood:"))
         header_layout.addWidget(self.mood_combo)
 
         # --- Formatting Toolbar ---
-        format_layout = QHBoxLayout()
+        self.format_widget = QWidget()
+        format_layout = QHBoxLayout(self.format_widget)
+        format_layout.setContentsMargins(0, 0, 0, 0)
 
         bold_btn = QPushButton("B")
         bold_btn.setFont(QFont("Arial", 10, QFont.Weight.Bold))
@@ -295,7 +450,10 @@ class DiaryWindow(QMainWindow):
         self.image_label.setFixedHeight(120)
         self.image_label.setStyleSheet("border: 1px dashed #CBD5E1; border-radius: 6px; color: #888888;")
 
-        photo_btn_layout = QHBoxLayout()
+        self.photo_widget = QWidget()
+        photo_btn_layout = QHBoxLayout(self.photo_widget)
+        photo_btn_layout.setContentsMargins(0, 0, 0, 0)
+
         self.attach_img_btn = QPushButton("📷 Attach Photo")
         self.attach_img_btn.setMinimumHeight(32)
         self.attach_img_btn.clicked.connect(self.attach_image)
@@ -331,17 +489,66 @@ class DiaryWindow(QMainWindow):
 
         # Assemble Right Panel
         right_panel.addLayout(header_layout)
-        right_panel.addLayout(format_layout)
+        right_panel.addWidget(self.format_widget)
         right_panel.addWidget(self.text_editor)
         right_panel.addWidget(self.word_count_label)
         right_panel.addWidget(self.image_label)
-        right_panel.addLayout(photo_btn_layout)
+        right_panel.addWidget(self.photo_widget)
         right_panel.addLayout(buttons_layout)
 
         main_layout.addLayout(left_panel, 1)
         main_layout.addLayout(right_panel, 2)
 
         self.apply_theme()
+
+    def handle_lock_button(self):
+        """Handles lock/unlock actions for the current entry date."""
+        if self.current_is_locked and self.current_date not in self.unlocked_session_dates:
+            # Entry is currently locked and hidden -> Prompt to unlock
+            dialog = EntryPinDialog(mode="verify", parent=self)
+            if dialog.exec() == QDialog.DialogCode.Accepted:
+                input_hash = hashlib.sha256(dialog.pin.encode()).hexdigest()
+                if input_hash == self.current_pin_hash:
+                    self.unlocked_session_dates.add(self.current_date)
+                    self.load_current_entry()
+                else:
+                    QMessageBox.warning(self, "Access Denied", "Incorrect password!")
+        elif self.current_is_locked and self.current_date in self.unlocked_session_dates:
+            # Entry is locked but currently visible -> Option to remove lock or relock
+            msg_box = QMessageBox(self)
+            msg_box.setWindowTitle("Entry Lock Options")
+            msg_box.setText("This entry is currently password protected.")
+            relock_btn = msg_box.addButton("🔒 Re-lock Now", QMessageBox.ButtonRole.ActionRole)
+            remove_btn = msg_box.addButton("🔓 Remove Password Protection", QMessageBox.ButtonRole.DestructiveRole)
+            msg_box.addButton(QMessageBox.StandardButton.Cancel)
+
+            msg_box.exec()
+
+            if msg_box.clickedButton() == relock_btn:
+                self.unlocked_session_dates.discard(self.current_date)
+                self.load_current_entry()
+            elif msg_box.clickedButton() == remove_btn:
+                self.current_is_locked = 0
+                self.current_pin_hash = ""
+                self.unlocked_session_dates.discard(self.current_date)
+                self.save_current_entry(show_prompt=False)
+                self.load_current_entry()
+                QMessageBox.information(self, "Protection Removed", "Password protection removed for this entry.")
+        else:
+            # Entry is NOT locked -> Set a password
+            dialog = EntryPinDialog(mode="set", parent=self)
+            if dialog.exec() == QDialog.DialogCode.Accepted:
+                self.current_pin_hash = hashlib.sha256(dialog.pin.encode()).hexdigest()
+                self.current_is_locked = 1
+                self.unlocked_session_dates.add(self.current_date)
+                self.save_current_entry(show_prompt=False)
+                self.load_current_entry()
+                QMessageBox.information(self, "Entry Locked", "Password protection enabled for this date!")
+
+    def open_analytics(self):
+        """Opens mood statistics dialog."""
+        dialog = MoodAnalyticsDialog(self.db, parent=self)
+        dialog.exec()
 
     def attach_image(self):
         """Selects an image, cleans up previous photos for date, copies to project storage, and updates UI."""
@@ -353,7 +560,6 @@ class DiaryWindow(QMainWindow):
             abs_photos_dir = os.path.join(get_app_dir(), rel_photos_dir)
             os.makedirs(abs_photos_dir, exist_ok=True)
 
-            # Clean up old image files matching the current date to prevent orphan extensions (.png vs .jpg)
             for existing_file in os.listdir(abs_photos_dir):
                 if existing_file.startswith(self.current_date + "."):
                     try:
@@ -417,6 +623,10 @@ class DiaryWindow(QMainWindow):
 
     def export_current_entry(self):
         """Exports active entry to a file."""
+        if self.current_is_locked and self.current_date not in self.unlocked_session_dates:
+            QMessageBox.warning(self, "Export Failed", "Unlock this entry first before exporting!")
+            return
+
         content = self.text_editor.toPlainText().strip()
         if not content:
             QMessageBox.warning(self, "Export Failed", "There is no text to export!")
@@ -505,16 +715,45 @@ class DiaryWindow(QMainWindow):
         self.load_current_entry()
 
     def load_current_entry(self):
-        """Loads text, mood, and photo from database into editor UI."""
+        """Loads text, mood, photo, and lock state from database into editor UI."""
         self.date_label.setText(f"Entry for: {self.current_date}")
 
         self.text_editor.blockSignals(True)
         self.mood_combo.blockSignals(True)
 
-        content, mood, image_path = self.db.get_entry(self.current_date)
-        self.text_editor.setHtml(content)
+        content, mood, image_path, is_locked, pin_hash = self.db.get_entry(self.current_date)
         self.current_image_path = image_path
-        self.display_image(image_path)
+        self.current_is_locked = is_locked
+        self.current_pin_hash = pin_hash
+
+        # Lock Verification Logic
+        if is_locked and self.current_date not in self.unlocked_session_dates:
+            # Mask entry content when locked
+            self.text_editor.setHtml(
+                "<h3 style='color: #EF4444;'>🔒 THIS ENTRY IS PASSWORD PROTECTED</h3>"
+                "<p>Click the <b>🔓 Unlock Entry</b> button in the top bar to enter your password and view this note.</p>"
+            )
+            self.text_editor.setReadOnly(True)
+            self.format_widget.setEnabled(False)
+            self.photo_widget.setEnabled(False)
+            self.image_label.setText("🔒 Photo hidden (Entry locked)")
+            self.image_label.setPixmap(QPixmap())
+            self.lock_entry_btn.setText("🔓 Unlock Entry")
+            self.lock_entry_btn.setStyleSheet("background-color: #EF4444; color: white; font-weight: bold;")
+        else:
+            # Unlocked state
+            self.text_editor.setReadOnly(False)
+            self.format_widget.setEnabled(True)
+            self.photo_widget.setEnabled(True)
+            self.text_editor.setHtml(content)
+            self.display_image(image_path)
+
+            if is_locked:
+                self.lock_entry_btn.setText("🔑 Lock Options")
+                self.lock_entry_btn.setStyleSheet("background-color: #F59E0B; color: white; font-weight: bold;")
+            else:
+                self.lock_entry_btn.setText("🔒 Lock Entry")
+                self.lock_entry_btn.setStyleSheet("")
 
         idx = self.mood_combo.findText(mood)
         if idx != -1:
@@ -529,12 +768,22 @@ class DiaryWindow(QMainWindow):
         self.update_word_count()
 
     def save_current_entry(self, show_prompt=True):
-        """Saves current text, mood tag, and image path to SQLite."""
+        """Saves current text, mood tag, image path, and lock status to SQLite."""
+        if self.current_is_locked and self.current_date not in self.unlocked_session_dates:
+            return  # Prevent overwriting locked data with placeholder text
+
         content = self.text_editor.toHtml() if self.text_editor.toPlainText().strip() else ""
         mood = self.mood_combo.currentText()
 
-        if content or self.current_image_path:
-            self.db.save_entry(self.current_date, content, mood, self.current_image_path)
+        if content or self.current_image_path or self.current_is_locked:
+            self.db.save_entry(
+                self.current_date,
+                content,
+                mood,
+                self.current_image_path,
+                self.current_is_locked,
+                self.current_pin_hash,
+            )
         else:
             self.db.delete_entry(self.current_date)
 
@@ -548,6 +797,10 @@ class DiaryWindow(QMainWindow):
 
     def delete_current_entry(self):
         """Deletes entry and clears editor."""
+        if self.current_is_locked and self.current_date not in self.unlocked_session_dates:
+            QMessageBox.warning(self, "Action Denied", "Unlock this entry first before deleting!")
+            return
+
         reply = QMessageBox.question(
             self,
             "Confirm Delete",
