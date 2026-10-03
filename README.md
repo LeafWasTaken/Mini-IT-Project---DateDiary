@@ -27,12 +27,17 @@
 ## 🚀 Getting Started
 
 ### Prerequisites
-
 Ensure you have Python 3.10 or higher installed on your machine.
 
 ### Installation
-
-1. **Clone the repository:**
+1. Clone the repository:
    ```bash
- [  git clone https://github.comcd Mini-IT-Project---DateDiary](https://github.io)
+   git clone https://github.com
+   ```
+
+2. Navigate into the project directory:
+   ```bash
+   cd Mini-IT-Project---DateDiary
+   ```
+
 
